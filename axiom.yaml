@@ -1,0 +1,9 @@
+name: christiangeorgelucas/http-tools
+version: 0.1.0
+language: go
+nodes:
+    - name: Request
+      input: HttpRequest
+      output: HttpResponse
+      kind: generic
+      generic_ports: [input, output]

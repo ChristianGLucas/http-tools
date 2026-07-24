@@ -1,0 +1,8 @@
+# Axiom build artifacts
+.axiom/
+
+# Generated proto bindings
+gen/
+
+# Go
+*.test

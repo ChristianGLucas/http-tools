@@ -1,0 +1,65 @@
+// This file defines the data contracts (messages) for your Axiom package.
+// Every node's --input and --output refers to a message defined here.
+//
+// Run `axiom create message <Name>` to scaffold a new message below.
+// Run `axiom generate` to compile these definitions into language bindings in gen/.
+//
+// DOCUMENTATION
+//   Comments written directly above a message or field declaration are extracted
+//   automatically at publish time and shown in the Axiom registry as documentation.
+//   Write your descriptions there — no separate doc files needed.
+//
+//   Leading comment  (no blank line before the declaration) → registry description ✓
+//   Detached comment (blank line before the declaration)    → ignored by registry  ✗
+//
+// This file is yours to edit. Axiom only appends new message blocks — it never
+// overwrites or removes content you have written.
+
+syntax = "proto3";
+
+package christiangeorgelucas.http_tools;
+
+option go_package = ".;gen";
+
+// A generalized outbound HTTP request. This is the generic input port of the
+// `Request` node: broad enough to express any single HTTP call, so an Instance
+// can map a flow's own typed message onto these fields. `body` carries the raw
+// request payload — an Instance typically binds it to a real message and a flow
+// author maps their fields onto it with a CEL adapter_plan.
+message HttpRequest {
+  // Absolute request URL, e.g. "https://api.example.com/v1/orders". Must be
+  // http/https; requests that resolve to private, loopback, link-local, or
+  // cloud-metadata addresses are refused (SSRF protection).
+  string url = 1;
+  // HTTP method: GET (default when empty), POST, PUT, PATCH, DELETE, HEAD.
+  string method = 2;
+  // Request headers, sent verbatim. Set Content-Type here when sending a body.
+  map<string, string> headers = 3;
+  // Query parameters, merged into the URL's query string (in addition to any
+  // already present in `url`).
+  map<string, string> query = 4;
+  // Raw request body bytes. Bind this to a typed message via an Instance to send
+  // structured payloads.
+  bytes body = 5;
+  // Per-request timeout in milliseconds. 0 uses the node default (30s).
+  int32 timeout_ms = 6;
+  // Whether to follow 3xx redirects (each hop is re-validated against the SSRF
+  // policy). Defaults to false.
+  bool follow_redirects = 7;
+}
+
+// A generalized outbound HTTP response. This is the generic output port of the
+// `Request` node. An Instance binds `body` to a real message so a downstream
+// edge sees typed fields instead of raw bytes.
+message HttpResponse {
+  // HTTP status code (e.g. 200, 404, 503).
+  int32 status_code = 1;
+  // Response headers as returned by the server.
+  map<string, string> headers = 2;
+  // Raw response body bytes. Bind this to a typed message via an Instance to
+  // parse structured responses downstream.
+  bytes body = 3;
+  // The final URL after any followed redirects (equals the request URL when no
+  // redirect occurred).
+  string final_url = 4;
+}
