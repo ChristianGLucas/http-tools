@@ -441,4 +441,149 @@ func TestRequest_AuthErrors(t *testing.T) {
 	}
 }
 
+// TestRequest_DualHeaderCarriers confirms the second auth carrier (auth_*_2)
+// resolves an independent named secret and sets a second header alongside the
+// primary — the two-credential shape of Datadog (DD-API-KEY + DD-APPLICATION-KEY)
+// and Alpaca. Each carrier's config carries only its secret NAME, never a value.
+func TestRequest_DualHeaderCarriers(t *testing.T) {
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+
+	var gotAPI, gotApp string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPI = r.Header.Get("DD-API-KEY")
+		gotApp = r.Header.Get("DD-APPLICATION-KEY")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx := newTestContext(t)
+	ctx.secretsMap["DATADOG_API_KEY"] = "api-secret"
+	ctx.secretsMap["DATADOG_APP_KEY"] = "app-secret"
+
+	got, err := nodes.Request(context.Background(), ctx, &gen.HttpRequest{
+		Url:              srv.URL,
+		AuthType:         "header",
+		AuthSecretName:   "DATADOG_API_KEY",
+		AuthHeaderName:   "DD-API-KEY",
+		AuthType_2:       "header",
+		AuthSecretName_2: "DATADOG_APP_KEY",
+		AuthHeaderName_2: "DD-APPLICATION-KEY",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.GetStatusCode() != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", got.GetStatusCode(), http.StatusOK)
+	}
+	if gotAPI != "api-secret" {
+		t.Errorf("DD-API-KEY header = %q, want api-secret", gotAPI)
+	}
+	if gotApp != "app-secret" {
+		t.Errorf("DD-APPLICATION-KEY header = %q, want app-secret", gotApp)
+	}
+}
+
+// TestRequest_DualCarrierMixedHeaderAndQuery confirms the two carriers can use
+// different placements (primary header + secondary query) and both are applied,
+// with the query-placed secret still redacted from the returned FinalUrl.
+func TestRequest_DualCarrierMixedHeaderAndQuery(t *testing.T) {
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+
+	var gotHeader, gotParam string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Client-Id")
+		gotParam = r.URL.Query().Get("client_secret")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx := newTestContext(t)
+	ctx.secretsMap["CLIENT_ID"] = "id-secret"
+	ctx.secretsMap["CLIENT_SECRET"] = "cs-secret"
+
+	got, err := nodes.Request(context.Background(), ctx, &gen.HttpRequest{
+		Url:              srv.URL,
+		AuthType:         "header",
+		AuthSecretName:   "CLIENT_ID",
+		AuthHeaderName:   "X-Client-Id",
+		AuthType_2:       "query",
+		AuthSecretName_2: "CLIENT_SECRET",
+		AuthParam_2:      "client_secret",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotHeader != "id-secret" {
+		t.Errorf("X-Client-Id header = %q, want id-secret", gotHeader)
+	}
+	if gotParam != "cs-secret" {
+		t.Errorf("server saw client_secret = %q, want cs-secret", gotParam)
+	}
+	if strings.Contains(got.GetFinalUrl(), "cs-secret") {
+		t.Errorf("FinalUrl leaked the second secret value: %q", got.GetFinalUrl())
+	}
+	if !strings.Contains(got.GetFinalUrl(), "client_secret=REDACTED") {
+		t.Errorf("FinalUrl = %q, want redacted client_secret param", got.GetFinalUrl())
+	}
+}
+
+// TestRequest_SecondCarrierErrors confirms the second carrier validates its own
+// companion fields and names them with the "_2" suffix in the error, and never
+// leaks the second secret value.
+func TestRequest_SecondCarrierErrors(t *testing.T) {
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+
+	ctx := newTestContext(t)
+	ctx.secretsMap["PRIMARY"] = "p"
+	ctx.secretsMap["SECOND"] = "should-never-appear-in-any-error"
+
+	cases := []struct {
+		name  string
+		input *gen.HttpRequest
+		want  string
+	}{
+		{
+			name: "missing secret name on carrier 2",
+			input: &gen.HttpRequest{
+				Url: "https://example.com", AuthType: "bearer", AuthSecretName: "PRIMARY",
+				AuthType_2: "header", AuthHeaderName_2: "X-App",
+			},
+			want: "auth_secret_name_2 is required",
+		},
+		{
+			name: "missing header name on carrier 2",
+			input: &gen.HttpRequest{
+				Url: "https://example.com", AuthType: "bearer", AuthSecretName: "PRIMARY",
+				AuthType_2: "header", AuthSecretName_2: "SECOND",
+			},
+			want: "auth_header_name_2 is required",
+		},
+		{
+			name: "unknown auth_type_2",
+			input: &gen.HttpRequest{
+				Url: "https://example.com", AuthType: "bearer", AuthSecretName: "PRIMARY",
+				AuthType_2: "basic", AuthSecretName_2: "SECOND",
+			},
+			want: "unsupported auth_type_2",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := nodes.Request(context.Background(), ctx, tc.input)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.want)
+			}
+			if strings.Contains(err.Error(), "should-never-appear-in-any-error") {
+				t.Errorf("error leaked the second secret value: %q", err.Error())
+			}
+		})
+	}
+}
+
 var _ axiom.Context = (*testContext)(nil) // compile-time interface check

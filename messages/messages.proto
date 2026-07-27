@@ -72,6 +72,28 @@ message HttpRequest {
   // this is the same shape as the built-in "bearer" type, which prepends
   // "Bearer ". Ignored for auth_type other than "header".
   string auth_value_prefix = 12;
+  // Optional SECOND auth carrier, for APIs that require TWO credentials on the
+  // same request (e.g. Datadog: "DD-API-KEY" + "DD-APPLICATION-KEY"; Alpaca:
+  // "APCA-API-KEY-ID" + "APCA-API-SECRET-KEY"). These five fields mirror
+  // auth_type/auth_secret_name/auth_header_name/auth_param/auth_value_prefix
+  // exactly and are applied identically and independently after the primary
+  // carrier. Both secrets are fetched server-side from ax.secrets by NAME and
+  // never appear in the manifest, config, or a CEL adapter; declare BOTH names
+  // in the Instance's required_secrets. Empty auth_type_2 (default) means no
+  // second carrier — fully backward compatible with 0.3.0.
+  string auth_type_2 = 13;
+  // The tenant secret NAME for the second carrier. Required when auth_type_2 is
+  // "bearer", "header", or "query".
+  string auth_secret_name_2 = 14;
+  // For auth_type_2="header": the request header to set to the second resolved
+  // secret value.
+  string auth_header_name_2 = 15;
+  // For auth_type_2="query": the query parameter name for the second resolved
+  // secret value.
+  string auth_param_2 = 16;
+  // For auth_type_2="header": an optional literal prefix prepended to the second
+  // resolved secret value (same semantics as auth_value_prefix).
+  string auth_value_prefix_2 = 17;
 }
 
 // A generalized outbound HTTP response. This is the generic output port of the
