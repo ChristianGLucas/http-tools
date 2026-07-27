@@ -46,6 +46,23 @@ message HttpRequest {
   // Whether to follow 3xx redirects (each hop is re-validated against the SSRF
   // policy). Defaults to false.
   bool follow_redirects = 7;
+  // Optional API-key auth to apply to this request. One of "" (no auth,
+  // default), "bearer", "header", or "query". When set, the actual secret
+  // VALUE is never carried here or anywhere in the manifest/config — the node
+  // fetches it server-side, at invocation time, from the caller's own secret
+  // store via `ax.secrets`, keyed by `auth_secret_name`. This field only says
+  // *how* to apply it and *which* named secret to use.
+  string auth_type = 8;
+  // The tenant secret NAME to resolve via ax.secrets at invocation time (e.g.
+  // "OPENAI_API_KEY") — never the secret value itself. Required when
+  // auth_type is set to "bearer", "header", or "query".
+  string auth_secret_name = 9;
+  // For auth_type="header": the request header to set to the resolved secret
+  // value (e.g. "X-API-Key"). Ignored for other auth_type values.
+  string auth_header_name = 10;
+  // For auth_type="query": the query parameter name to set to the resolved
+  // secret value (e.g. "api_key"). Ignored for other auth_type values.
+  string auth_param = 11;
 }
 
 // A generalized outbound HTTP response. This is the generic output port of the

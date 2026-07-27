@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -75,6 +76,50 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 		u.RawQuery = vals.Encode()
 	}
 
+	// Optional API-key auth. The instance config carries only a secret NAME
+	// and a placement (auth_type/auth_header_name/auth_param) — never a
+	// value. The value itself is fetched here, server-side, from the calling
+	// tenant's own secret store via ax.Secrets(); it never appears in the
+	// manifest, in an Instance's config, or in a CEL adapter.
+	authType := strings.TrimSpace(input.GetAuthType())
+	var authHeaderName, authHeaderValue, redactQueryParam string
+	switch authType {
+	case "":
+		// No auth requested.
+	case "bearer", "header", "query":
+		secretName := strings.TrimSpace(input.GetAuthSecretName())
+		if secretName == "" {
+			return nil, fmt.Errorf("auth_secret_name is required when auth_type is %q", authType)
+		}
+		secretValue, ok := ax.Secrets().Get(secretName)
+		if !ok {
+			return nil, fmt.Errorf("required secret %q is not configured", secretName)
+		}
+		switch authType {
+		case "bearer":
+			authHeaderName = "Authorization"
+			authHeaderValue = "Bearer " + secretValue
+		case "header":
+			headerName := strings.TrimSpace(input.GetAuthHeaderName())
+			if headerName == "" {
+				return nil, fmt.Errorf("auth_header_name is required when auth_type is \"header\"")
+			}
+			authHeaderName = headerName
+			authHeaderValue = secretValue
+		case "query":
+			param := strings.TrimSpace(input.GetAuthParam())
+			if param == "" {
+				return nil, fmt.Errorf("auth_param is required when auth_type is \"query\"")
+			}
+			vals := u.Query()
+			vals.Set(param, secretValue)
+			u.RawQuery = vals.Encode()
+			redactQueryParam = param
+		}
+	default:
+		return nil, fmt.Errorf("unsupported auth_type %q: must be one of \"\", \"bearer\", \"header\", \"query\"", authType)
+	}
+
 	timeout := defaultTimeout
 	if ms := input.GetTimeoutMs(); ms > 0 {
 		timeout = time.Duration(ms) * time.Millisecond
@@ -93,16 +138,33 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 	for k, v := range input.GetHeaders() {
 		req.Header.Set(k, v)
 	}
+	if authHeaderName != "" {
+		// Set last so a caller-supplied header of the same name can never
+		// mask (or be confused with) the resolved secret.
+		req.Header.Set(authHeaderName, authHeaderValue)
+	}
 
-	client := newGuardedClient(input.GetFollowRedirects())
+	client := newGuardedClient(input.GetFollowRedirects(), authHeaderName, redactQueryParam)
 
-	ax.Log().Info("http request", "method", method, "url", u.String())
+	// Log only method + URL, and never the value of a query-placed secret —
+	// the Authorization/custom-auth header itself is never logged either.
+	ax.Log().Info("http request", "method", method, "url", redactURL(u, redactQueryParam))
 	resp, err := client.Do(req)
 	if err != nil {
 		// A blocked-address dial surfaces here; keep the message actionable and
 		// free of internal detail.
 		if isBlockedErr(err) {
 			return nil, fmt.Errorf("request to %q refused: resolves to a private or internal address", u.Host)
+		}
+		// A transport error is a *url.Error whose message renders the full request
+		// URL. url.Error strips only userinfo, NOT the query string — so a
+		// query-placed secret (auth_type="query") would otherwise leak into the
+		// returned error, and thus into the flow's failure event and logs. Rebuild
+		// the message from the redacted URL + the underlying cause instead of
+		// %w-ing the raw *url.Error.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return nil, fmt.Errorf("request to %s failed: %v", redactURL(u, redactQueryParam), urlErr.Err)
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -117,7 +179,10 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 		StatusCode: int32(resp.StatusCode),
 		Headers:    flattenHeaders(resp.Header),
 		Body:       body,
-		FinalUrl:   resp.Request.URL.String(),
+		// Redact a query-placed secret here too: FinalUrl flows out to the
+		// caller/flow, so it must never carry the resolved value even though
+		// the actual outbound request legitimately did.
+		FinalUrl: redactURL(resp.Request.URL, redactQueryParam),
 	}
 	ax.Log().Info("http response", "status", resp.StatusCode, "bytes", len(body))
 	return out, nil
@@ -141,7 +206,7 @@ func isBlockedErr(err error) bool {
 // resolved IP of every connection — including each redirect hop, since every
 // hop opens a fresh dial — defeating DNS-rebinding by checking the exact address
 // the socket will use rather than re-resolving the hostname.
-func newGuardedClient(followRedirects bool) *http.Client {
+func newGuardedClient(followRedirects bool, sensitiveHeader, sensitiveQueryParam string) *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -175,6 +240,23 @@ func newGuardedClient(followRedirects bool) *http.Client {
 			}
 			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 				return fmt.Errorf("redirect to unsupported scheme %q", req.URL.Scheme)
+			}
+			// Credential-egress guard: Go's http.Client strips Authorization/Cookie
+			// on a cross-host redirect, but NOT a custom auth header (e.g. X-API-Key)
+			// nor a query-placed secret. Drop the resolved secret whenever the
+			// redirect leaves the original host, so a redirect to an
+			// attacker-controlled PUBLIC host (which the SSRF IP-guard permits) can't
+			// harvest a key the caller only meant for the original host.
+			if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+				if sensitiveHeader != "" {
+					req.Header.Del(sensitiveHeader)
+				}
+				if sensitiveQueryParam != "" {
+					if q := req.URL.Query(); q.Has(sensitiveQueryParam) {
+						q.Del(sensitiveQueryParam)
+						req.URL.RawQuery = q.Encode()
+					}
+				}
 			}
 			return nil
 		}
@@ -210,6 +292,23 @@ func isBlockedIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// redactURL renders u as a string with the named query parameter's value
+// replaced by a fixed placeholder, so a secret placed via auth_type="query"
+// never reaches a log line or the node's own output. Pass "" for
+// redactParam to render the URL unchanged (the common, no-query-auth case).
+func redactURL(u *url.URL, redactParam string) string {
+	if redactParam == "" {
+		return u.String()
+	}
+	redacted := *u
+	vals := redacted.Query()
+	if vals.Get(redactParam) != "" {
+		vals.Set(redactParam, "REDACTED")
+		redacted.RawQuery = vals.Encode()
+	}
+	return redacted.String()
 }
 
 // flattenHeaders collapses multi-valued HTTP headers into a single map, joining
