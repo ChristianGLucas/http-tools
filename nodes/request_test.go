@@ -271,6 +271,70 @@ func TestRequest_AuthHeader(t *testing.T) {
 	}
 }
 
+// TestRequest_AuthHeaderWithPrefix confirms auth_type="header" with a
+// non-empty auth_value_prefix prepends the literal prefix (trailing space and
+// all) to the resolved secret — the DeepL/Shippo/Token/ApiKey scheme shape —
+// while the config still carries only the secret NAME, never its value.
+func TestRequest_AuthHeaderWithPrefix(t *testing.T) {
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx := newTestContext(t)
+	ctx.secretsMap["DEEPL_API_KEY"] = "abc-123"
+
+	_, err := nodes.Request(context.Background(), ctx, &gen.HttpRequest{
+		Url:             srv.URL,
+		AuthType:        "header",
+		AuthSecretName:  "DEEPL_API_KEY",
+		AuthHeaderName:  "Authorization",
+		AuthValuePrefix: "DeepL-Auth-Key ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "DeepL-Auth-Key abc-123"; gotHeader != want {
+		t.Errorf("Authorization header = %q, want %q", gotHeader, want)
+	}
+}
+
+// TestRequest_AuthHeaderEmptyPrefixUnchanged confirms an empty
+// auth_value_prefix preserves the 0.2.0 behavior exactly (raw secret value).
+func TestRequest_AuthHeaderEmptyPrefixUnchanged(t *testing.T) {
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-API-Key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx := newTestContext(t)
+	ctx.secretsMap["SVC_KEY"] = "hdr-secret"
+
+	_, err := nodes.Request(context.Background(), ctx, &gen.HttpRequest{
+		Url:            srv.URL,
+		AuthType:       "header",
+		AuthSecretName: "SVC_KEY",
+		AuthHeaderName: "X-API-Key",
+		// AuthValuePrefix intentionally unset.
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "hdr-secret"; gotHeader != want {
+		t.Errorf("X-API-Key header = %q, want %q (empty prefix must send raw value)", gotHeader, want)
+	}
+}
+
 // TestRequest_AuthQueryRedacted confirms auth_type="query" places the
 // resolved secret as a query parameter on the OUTBOUND request, but the
 // value never appears in the node's own returned FinalUrl — it must come

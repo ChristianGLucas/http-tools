@@ -63,6 +63,15 @@ message HttpRequest {
   // For auth_type="query": the query parameter name to set to the resolved
   // secret value (e.g. "api_key"). Ignored for other auth_type values.
   string auth_param = 11;
+  // For auth_type="header": an optional literal string prepended to the
+  // resolved secret value in auth_header_name — for APIs whose scheme puts a
+  // fixed prefix in front of the key (e.g. auth_header_name="Authorization"
+  // with auth_value_prefix="DeepL-Auth-Key " → "Authorization: DeepL-Auth-Key
+  // <key>"; or "Token ", "ShippoToken ", "ApiKey "). Include any trailing
+  // space. Empty (default) sends the raw secret value, unchanged. Mechanically
+  // this is the same shape as the built-in "bearer" type, which prepends
+  // "Bearer ". Ignored for auth_type other than "header".
+  string auth_value_prefix = 12;
 }
 
 // A generalized outbound HTTP response. This is the generic output port of the

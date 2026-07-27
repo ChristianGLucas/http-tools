@@ -105,7 +105,12 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 				return nil, fmt.Errorf("auth_header_name is required when auth_type is \"header\"")
 			}
 			authHeaderName = headerName
-			authHeaderValue = secretValue
+			// Optional static scheme prefix (e.g. "DeepL-Auth-Key ", "Token ",
+			// "ShippoToken ", "ApiKey ") — the same shape "bearer" uses with
+			// "Bearer ". Not trimmed: the prefix is a literal and a trailing
+			// space is significant, so it is concatenated verbatim. Empty
+			// (default) sends the raw secret value, preserving 0.2.0 behavior.
+			authHeaderValue = input.GetAuthValuePrefix() + secretValue
 		case "query":
 			param := strings.TrimSpace(input.GetAuthParam())
 			if param == "" {
