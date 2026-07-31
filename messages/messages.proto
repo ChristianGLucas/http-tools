@@ -94,6 +94,26 @@ message HttpRequest {
   // For auth_type_2="header": an optional literal prefix prepended to the second
   // resolved secret value (same semantics as auth_value_prefix).
   string auth_value_prefix_2 = 17;
+  // Turn TRANSPORT-level failures into a typed response instead of failing the
+  // node. Default false preserves the original behaviour exactly.
+  //
+  // A transport failure — a malformed URL, a DNS miss, an SSRF refusal, a
+  // connect error, a timeout — is normally a hard node failure, which aborts
+  // the WHOLE flow ("graph produced no terminal result"). A flow built on this
+  // node therefore could not express a typed ok:false for a bad or unreachable
+  // URL: the failure escaped the flow's own error contract entirely, and no
+  // downstream facade could report it.
+  //
+  // With typed_errors=true the node still returns a normal HttpResponse, with
+  // status_code=0, error_code set to a machine token and error to a
+  // human-readable reason. Genuine PROGRAMMING errors (an unsupported method,
+  // a missing/misconfigured auth secret) still fail hard — they are bugs in the
+  // graph, not runtime conditions a flow should branch on.
+  //
+  // Test success with `error_code == ""`, NOT with a presence guard: proto3
+  // singular scalars have no field presence, so an optional guard can never
+  // fire on them.
+  bool typed_errors = 18;
 }
 
 // A generalized outbound HTTP response. This is the generic output port of the
@@ -110,4 +130,19 @@ message HttpResponse {
   // The final URL after any followed redirects (equals the request URL when no
   // redirect occurred).
   string final_url = 4;
+  // Machine-readable transport-failure token; EMPTY on any completed HTTP
+  // exchange, including a 4xx/5xx (that is a successful exchange with an error
+  // status — read status_code for it). Only ever set when the request carried
+  // typed_errors=true. One of:
+  //   INVALID_URL        the url was empty, unparseable, not http/https, or had no host
+  //   BLOCKED_ADDRESS    refused by the SSRF policy (private/loopback/link-local/metadata)
+  //   TIMEOUT            the per-request timeout elapsed
+  //   REQUEST_FAILED     DNS failure, connection refused, TLS failure, too many redirects
+  //   BODY_READ_FAILED   the response began but its body could not be read
+  // Test success with `error_code == ""` — a proto3 singular scalar has no
+  // presence, so an optional guard cannot fire on it.
+  string error_code = 5;
+  // Human-readable reason matching error_code; empty when error_code is empty.
+  // Any credential in the URL's query string is redacted.
+  string error = 6;
 }

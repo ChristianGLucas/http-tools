@@ -36,6 +36,29 @@ var allowedMethods = map[string]bool{
 	http.MethodOptions: true,
 }
 
+// transportFailure renders a TRANSPORT-level failure either as a hard node
+// error (the default, unchanged) or as a typed HttpResponse.
+//
+// A transport failure — a malformed URL, a DNS miss, an SSRF refusal, a connect
+// error, a timeout — used to be a hard NODE_FAILED unconditionally, which
+// aborts the WHOLE flow ("graph produced no terminal result"). A flow built on
+// this node therefore could not express a typed ok:false for a bad or
+// unreachable URL: the failure escaped the flow's own error contract, so no
+// downstream facade could report it and the flow simply died.
+//
+// typed_errors=true keeps the failure INSIDE the response contract:
+// status_code=0 with error_code/error set, so a facade can surface it as a
+// structured result. Genuine PROGRAMMING errors (an unsupported method, a
+// missing auth secret) deliberately do NOT route through here — those are bugs
+// in the graph, not runtime conditions worth branching on.
+func transportFailure(input *gen.HttpRequest, code, format string, args ...any) (*gen.HttpResponse, error) {
+	err := fmt.Errorf(format, args...)
+	if !input.GetTypedErrors() {
+		return nil, err
+	}
+	return &gen.HttpResponse{ErrorCode: code, Error: err.Error()}, nil
+}
+
 // Request performs a single outbound HTTP call and returns the response. It is a
 // generic node: an Instance binds the request/response body to a real message so
 // a flow author maps typed fields on and off the wire. Egress is SSRF-hardened —
@@ -46,17 +69,17 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 	// HTTP stack.
 	rawURL := strings.TrimSpace(input.GetUrl())
 	if rawURL == "" {
-		return nil, fmt.Errorf("url is required")
+		return transportFailure(input, "INVALID_URL", "url is required")
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url %q: %w", rawURL, err)
+		return transportFailure(input, "INVALID_URL", "invalid url %q: %v", rawURL, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported url scheme %q: only http and https are allowed", u.Scheme)
+		return transportFailure(input, "INVALID_URL", "unsupported url scheme %q: only http and https are allowed", u.Scheme)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("url %q has no host", rawURL)
+		return transportFailure(input, "INVALID_URL", "url %q has no host", rawURL)
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(input.GetMethod()))
@@ -142,7 +165,7 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 		// A blocked-address dial surfaces here; keep the message actionable and
 		// free of internal detail.
 		if isBlockedErr(err) {
-			return nil, fmt.Errorf("request to %q refused: resolves to a private or internal address", u.Host)
+			return transportFailure(input, "BLOCKED_ADDRESS", "request to %q refused: resolves to a private or internal address", u.Host)
 		}
 		// A transport error is a *url.Error whose message renders the full request
 		// URL. url.Error strips only userinfo, NOT the query string — so a
@@ -150,17 +173,21 @@ func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*ge
 		// returned error, and thus into the flow's failure event and logs. Rebuild
 		// the message from the redacted URL + the underlying cause instead of
 		// %w-ing the raw *url.Error.
+		code := "REQUEST_FAILED"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "TIMEOUT"
+		}
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return nil, fmt.Errorf("request to %s failed: %v", redactURL(u, redactParams), urlErr.Err)
+			return transportFailure(input, code, "request to %s failed: %v", redactURL(u, redactParams), urlErr.Err)
 		}
-		return nil, fmt.Errorf("request failed: %w", err)
+		return transportFailure(input, code, "request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		return transportFailure(input, "BODY_READ_FAILED", "reading response body: %v", err)
 	}
 
 	out := &gen.HttpResponse{

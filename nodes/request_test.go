@@ -587,3 +587,106 @@ func TestRequest_SecondCarrierErrors(t *testing.T) {
 }
 
 var _ axiom.Context = (*testContext)(nil) // compile-time interface check
+
+// A TRANSPORT-level failure — a malformed URL, a DNS miss, an SSRF refusal, a
+// connect error, a timeout — was unconditionally a hard NODE_FAILED, which
+// aborts the WHOLE flow ("graph produced no terminal result"). A flow built on
+// this node therefore could not express a typed ok:false for a bad or
+// unreachable URL: the failure escaped the flow's own error contract, so no
+// downstream facade could report it. Repro: fetch-page-markdown with
+// {"url":"not-a-url"} or a .invalid host.
+//
+// typed_errors=true keeps the failure inside the response contract. Default
+// false is the original behaviour, byte for byte.
+
+func TestRequest_TypedErrors_BadURLReturnsTypedResponse(t *testing.T) {
+	for _, c := range []struct{ name, url, wantCode string }{
+		{"not a url", "not-a-url", "INVALID_URL"},
+		{"empty", "", "INVALID_URL"},
+		{"bad scheme", "ftp://example.com/x", "INVALID_URL"},
+		{"no host", "http://", "INVALID_URL"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := nodes.Request(context.Background(), newTestContext(t), &gen.HttpRequest{
+				Url: c.url, TypedErrors: true,
+			})
+			if err != nil {
+				t.Fatalf("typed_errors=true must NOT fail the node: %v", err)
+			}
+			if out.GetErrorCode() != c.wantCode {
+				t.Errorf("error_code = %q, want %q", out.GetErrorCode(), c.wantCode)
+			}
+			if out.GetError() == "" {
+				t.Error("error must carry a human-readable reason")
+			}
+			if out.GetStatusCode() != 0 {
+				t.Errorf("status_code = %d, want 0 for a transport failure", out.GetStatusCode())
+			}
+		})
+	}
+}
+
+func TestRequest_TypedErrors_UnreachableHost(t *testing.T) {
+	out, err := nodes.Request(context.Background(), newTestContext(t), &gen.HttpRequest{
+		Url: "https://this-host-does-not-exist.invalid/x", TypedErrors: true, TimeoutMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("typed_errors=true must NOT fail the node on a DNS miss: %v", err)
+	}
+	if out.GetErrorCode() != "REQUEST_FAILED" && out.GetErrorCode() != "TIMEOUT" {
+		t.Errorf("error_code = %q, want REQUEST_FAILED or TIMEOUT", out.GetErrorCode())
+	}
+}
+
+func TestRequest_TypedErrors_SSRFRefusalIsTyped(t *testing.T) {
+	out, err := nodes.Request(context.Background(), newTestContext(t), &gen.HttpRequest{
+		Url: "http://169.254.169.254/latest/meta-data/", TypedErrors: true, TimeoutMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("typed_errors=true must NOT fail the node on an SSRF refusal: %v", err)
+	}
+	if out.GetErrorCode() != "BLOCKED_ADDRESS" && out.GetErrorCode() != "REQUEST_FAILED" {
+		t.Errorf("error_code = %q, want BLOCKED_ADDRESS", out.GetErrorCode())
+	}
+	// The refusal must still BE a refusal — never a silent success.
+	if out.GetStatusCode() != 0 {
+		t.Errorf("a blocked address must not report an HTTP status; got %d", out.GetStatusCode())
+	}
+}
+
+// Default OFF: every existing flow and connector keeps the original hard-failure
+// behaviour exactly.
+func TestRequest_TypedErrorsDefaultOffStillFailsHard(t *testing.T) {
+	for _, u := range []string{"not-a-url", "", "ftp://example.com/x"} {
+		if _, err := nodes.Request(context.Background(), newTestContext(t), &gen.HttpRequest{Url: u}); err == nil {
+			t.Errorf("url %q with typed_errors unset must still fail the node (backward compatibility)", u)
+		}
+	}
+}
+
+// A 4xx/5xx is a COMPLETED exchange, not a transport failure — error_code must
+// stay empty so `error_code == ""` cannot be confused with "HTTP succeeded".
+func TestRequest_TypedErrors_HTTPErrorStatusIsNotATransportError(t *testing.T) {
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":"nope"}`))
+	}))
+	defer srv.Close()
+
+	out, err := nodes.Request(context.Background(), newTestContext(t), &gen.HttpRequest{Url: srv.URL, TypedErrors: true})
+	if err != nil {
+		t.Fatalf("unexpected node error: %v", err)
+	}
+	if out.GetErrorCode() != "" {
+		t.Errorf("a 404 is a completed exchange; error_code must stay empty, got %q", out.GetErrorCode())
+	}
+	if out.GetStatusCode() != 404 {
+		t.Errorf("status_code = %d, want 404", out.GetStatusCode())
+	}
+	if len(out.GetBody()) == 0 {
+		t.Error("the error body must still be delivered so a facade can parse it")
+	}
+}
