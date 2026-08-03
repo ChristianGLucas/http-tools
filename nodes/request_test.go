@@ -75,7 +75,7 @@ func (testReflection) Flow() axiom.FlowReflection { return testFlowReflection{} 
 // with the expected package + condition (ADR-051/054).
 type testFlowMutation struct{}
 
-func (testFlowMutation) AddNode(_, _ string, _ *axiom.CanvasPosition) uint32 { return 0 }
+func (testFlowMutation) AddNode(_, _, _ string, _ *axiom.CanvasPosition) uint32 { return 0 }
 func (testFlowMutation) AddEdge(_, _ uint32, _ *axiom.EdgeCondition)         {}
 
 type testMutation struct{}

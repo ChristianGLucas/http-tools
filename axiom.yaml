@@ -1,5 +1,5 @@
 name: christiangeorgelucas/http-tools
-version: 0.5.0
+version: 0.6.0
 language: go
 nodes:
     - name: Request
@@ -7,3 +7,18 @@ nodes:
       output: HttpResponse
       kind: generic
       generic_ports: [input, output]
+    - name: StreamBody
+      description: "GET a URL and emit its response body as a series of raw byte chunks, read incrementally from the response as it downloads (never buffered whole in memory) — chunk size ~1 MiB by default, well under the platform's 24 MiB/frame ceiling. A non-2xx status or any transport failure ends the stream with a single structured error frame instead of a node failure (see StreamBodyChunk.error_code). Idempotent: a redelivered execution restarts the download from byte 0."
+      input: StreamGetRequest
+      output: StreamBodyChunk
+      type: pipeline
+    - name: StreamLines
+      description: "GET a URL and emit its response body one line at a time, read incrementally as it downloads. Recognizes both LF and CRLF terminators; does NOT flush a final line that lacks a terminator (see StreamLine's docs). A non-2xx status or transport failure ends the stream with a single structured error frame. Idempotent: a redelivered execution restarts from line 1."
+      input: StreamGetRequest
+      output: StreamLine
+      type: pipeline
+    - name: StreamSse
+      description: "GET a text/event-stream URL and emit one frame per dispatched Server-Sent Event, parsed per the WHATWG spec as bytes arrive live — the primitive for relaying an LLM-token-style SSE endpoint. Runs until the server closes the connection or the platform's 5-minute node-stream ceiling, whichever is first. A non-2xx status or transport failure ends the stream with a single structured error frame. Idempotent: a redelivered execution restarts from event 0."
+      input: StreamGetRequest
+      output: StreamSseEvent
+      type: pipeline

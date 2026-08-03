@@ -287,7 +287,12 @@ type EdgeCondition struct {
 // AddNode returns the batch-local instance id the SDK has assigned;
 // use it on subsequent AddEdge calls within the same handler.
 type FlowMutation interface {
-	AddNode(packageName, packageVersion string, canvasPosition *CanvasPosition) uint32
+	// AddNode declares the exact node to append: (package, version, node name).
+	// Any resolvable node is addable — including nodes from the emitter's own
+	// package — and a package may carry any number of mutation-capable nodes
+	// (mutation gap closure P1/P2, 2026-08-01; supersedes the v1
+	// one-mutation-entry-point-per-package rule).
+	AddNode(packageName, packageVersion, nodeName string, canvasPosition *CanvasPosition) uint32
 	// AddEdge wires an edge from src to dst. Pass a non-nil condition
 	// (ADR-054) for a conditional dispatch edge; pass nil for an
 	// unconditional edge (v1 behaviour).

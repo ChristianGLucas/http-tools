@@ -146,3 +146,179 @@ message HttpResponse {
   // Any credential in the URL's query string is redacted.
   string error = 6;
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline SOURCE nodes: StreamBody / StreamLines / StreamSse (v0.6.0)
+// ---------------------------------------------------------------------------
+//
+// These three nodes are GET-oriented streaming sources: each issues exactly
+// ONE outbound HTTP GET and emits its response progressively as a series of
+// frames, reading directly from the response body as it downloads — never
+// buffering the whole thing in memory. They share this request shape.
+//
+// AT-LEAST-ONCE DELIVERY: a redelivered pipeline execution restarts the GET
+// from scratch (byte 0 / line 1 / event 0 — there is no Range/resume
+// support), which is safe because a GET is idempotent: identical bytes are
+// requested again. A caller building side effects on top of individual
+// frames (e.g. writing each chunk somewhere) must tolerate seeing the whole
+// sequence replayed on redelivery, not just the tail.
+message StreamGetRequest {
+  // Absolute request URL, e.g. "https://example.com/data.csv". Must be
+  // http/https; requests that resolve to private, loopback, link-local, or
+  // cloud-metadata addresses are refused (SSRF protection), exactly like the
+  // Request node.
+  string url = 1;
+  // Request headers, sent verbatim.
+  map<string, string> headers = 2;
+  // Query parameters, merged into the URL's query string.
+  map<string, string> query = 3;
+  // Overall time budget in milliseconds for the ENTIRE stream — connecting,
+  // receiving headers, AND reading the full body to completion — not a
+  // per-chunk timeout. 0 uses the node default of 270000ms (4m30s), chosen
+  // to sit safely under the platform's hard 5-minute per-node stream
+  // ceiling while leaving headroom for the platform to close out the
+  // stream cleanly. Unlike the unary Request node's 30s default, these
+  // nodes exist to carry a full download to completion, so the default is
+  // deliberately generous rather than tuned for a single fast round trip.
+  int32 timeout_ms = 4;
+  // Whether to follow 3xx redirects (each hop re-validated against the SSRF
+  // policy). Defaults to false.
+  bool follow_redirects = 5;
+  // Optional API-key auth, applied identically to the Request node's
+  // primary carrier (see HttpRequest.auth_type for the full semantics: one
+  // of "" (default, no auth), "bearer", "header", or "query"; the secret
+  // VALUE is resolved server-side via ax.secrets by name, never carried
+  // here). These streaming nodes support only ONE auth carrier — there is
+  // no auth_type_2.
+  string auth_type = 6;
+  // The tenant secret NAME to resolve via ax.secrets, required when
+  // auth_type is "bearer", "header", or "query".
+  string auth_secret_name = 7;
+  // For auth_type="header": the request header to set to the resolved
+  // secret value.
+  string auth_header_name = 8;
+  // For auth_type="query": the query parameter name to set to the resolved
+  // secret value.
+  string auth_param = 9;
+  // For auth_type="header": an optional literal prefix prepended to the
+  // resolved secret value (e.g. "Bearer ", "Token "). Empty sends the raw
+  // value.
+  string auth_value_prefix = 10;
+  // StreamBody ONLY: target size in bytes of each emitted chunk. 0 uses the
+  // node default of 1 MiB (1048576). Clamped to [4096, 4194304] (4 KiB..4
+  // MiB) — well under the platform's 24 MiB/frame ceiling. Ignored by
+  // StreamLines and StreamSse, which emit one frame per line/event instead
+  // of by size.
+  int32 chunk_size_bytes = 11;
+}
+
+// One chunk of a StreamBody download, in download order. Chunks are
+// contiguous: this chunk's bytes span [byte_offset, byte_offset+len(data))
+// of the full response body.
+message StreamBodyChunk {
+  // Raw body bytes for this chunk. Empty on the terminal error frame and on
+  // the lone final frame of a zero-byte body.
+  bytes data = 1;
+  // Byte offset of data[0] within the full response body (0 on the first
+  // chunk).
+  int64 byte_offset = 2;
+  // HTTP status code, set once response headers arrive (0 before that, and
+  // on a pure transport failure that never got a response at all).
+  int32 status_code = 3;
+  // Machine-readable failure token, set ONLY on the single terminal error
+  // frame emitted in place of the next chunk when the request cannot
+  // complete. Empty on every successful chunk. One of:
+  //   INVALID_URL       the url was empty, unparseable, not http/https, or had no host
+  //   BLOCKED_ADDRESS   refused by the SSRF policy
+  //   TIMEOUT           the overall stream time budget elapsed
+  //   REQUEST_FAILED    DNS failure, connection refused, TLS failure, too many redirects
+  //   BODY_READ_FAILED  the download started but the connection dropped before completion
+  //   HTTP_ERROR_STATUS the response completed its headers with a non-2xx status
+  // A pipeline node cannot return a normal error mid-stream (there is no
+  // unary error envelope once frames have started), so a runtime failure is
+  // always surfaced as this in-band terminal frame, never a hard node
+  // failure — EXCEPT a pre-flight validation error (a malformed url, an
+  // unsupported auth_type, a missing required secret), which fails the node
+  // before any frame is emitted, exactly like the unary Request node's
+  // default (non-typed_errors) behavior for the same class of problem.
+  string error_code = 4;
+  // Human-readable reason matching error_code; empty when error_code is
+  // empty.
+  string error = 5;
+  // True on the last frame emitted — either the final successful chunk or
+  // the terminal error frame. Test for stream-end with this field; a
+  // proto3 scalar has no presence, so a guard on any other field cannot
+  // detect "no more chunks."
+  bool is_final = 6;
+}
+
+// One line of a StreamLines download, in order. StreamLines is a raw
+// line-splitter (both CRLF and LF recognized as a terminator) — it does NOT
+// flush a trailing line that lacks a terminator: a body whose last line has
+// no final "\n" simply loses that last partial line. This keeps the node a
+// simple, honest "split on newlines as they arrive" primitive rather than a
+// document parser — record-stream-tools' StreamLogLines/NDJSON/CSV nodes
+// are the ones responsible for complete, tail-flushing document parsing.
+message StreamLine {
+  // The line's text with its line terminator ("\n" or "\r\n") removed.
+  // Empty on the terminal error frame.
+  string line = 1;
+  // 1-based line number among lines actually emitted (a trailing line
+  // without a terminator that got dropped at end-of-body does not consume
+  // a number).
+  int64 line_number = 2;
+  // HTTP status code, set once response headers arrive.
+  int32 status_code = 3;
+  // Machine-readable failure token; same tokens and same in-band-error
+  // rationale as StreamBodyChunk.error_code.
+  string error_code = 4;
+  // Human-readable reason matching error_code.
+  string error = 5;
+  // True on the last frame emitted — the final complete line, or the
+  // terminal error frame. A body with zero complete lines (empty, or a
+  // single line with no trailing terminator) emits exactly one frame with
+  // is_final=true and every other field at its zero value.
+  bool is_final = 6;
+}
+
+// One dispatched SSE event from a StreamSse connection, parsed per the
+// WHATWG "event stream" algorithm — the same semantics as
+// record-stream-tools' StreamSseEvents, applied live as bytes arrive
+// instead of to a pre-collected transcript. Runs until the server closes
+// the connection or the platform's 5-minute node-stream ceiling is hit,
+// whichever comes first; this is the primitive for relaying an
+// LLM-token-style SSE endpoint frame-by-frame.
+message StreamSseEvent {
+  // 0-based position of this event among events actually dispatched.
+  int64 index = 1;
+  // The event's id field (the last non-null "id:" value seen at or before
+  // dispatch; persists across events per spec). Empty if never set.
+  string id = 2;
+  // The event's type: its "event:" field value, or "message" if none was
+  // set.
+  string event = 3;
+  // The event's data: every "data:" line joined with "\n", trailing
+  // newline removed.
+  string data = 4;
+  // Reconnection time in milliseconds from a "retry:" field seen at or
+  // before this event, if any. Meaningful only when retry_set is true.
+  int32 retry_ms = 5;
+  // True when a valid non-negative "retry:" field has been seen at or
+  // before this event.
+  bool retry_set = 6;
+  // HTTP status code, set once response headers arrive.
+  int32 status_code = 7;
+  // Machine-readable failure token; same tokens and same in-band-error
+  // rationale as StreamBodyChunk.error_code. Unlike record-stream-tools'
+  // StreamSseEvents (which is total over an already-complete transcript and
+  // never errors), a LIVE connection can fail transport-side mid-stream, so
+  // this node does have an error frame.
+  string error_code = 8;
+  // Human-readable reason matching error_code.
+  string error = 9;
+  // True on the last frame emitted: the final event dispatched before the
+  // connection closed cleanly, or the terminal error frame. A connection
+  // that closes with zero dispatched events emits exactly one frame with
+  // is_final=true and every other field at its zero value.
+  bool is_final = 10;
+}
