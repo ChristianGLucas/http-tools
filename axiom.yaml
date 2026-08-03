@@ -1,12 +1,17 @@
 name: christiangeorgelucas/http-tools
-version: 0.6.0
+version: 0.7.0
 language: go
 nodes:
     - name: Request
+      description: "The GENERIC HTTP node behind connector Instances (ADR-118/ADR-122): a downstream Instance binds these generalized ports to a real, concrete message. Not for direct use in a flow or invoke — use Fetch for that. Performs a single outbound HTTP call and returns the response; egress is SSRF-hardened (loopback/private/link-local/cloud-metadata addresses refused, every redirect hop re-validated)."
       input: HttpRequest
       output: HttpResponse
       kind: generic
       generic_ports: [input, output]
+    - name: Fetch
+      description: "The direct-use HTTP node for flows and invokes: performs a single outbound HTTP call to a caller-supplied URL and returns the response. Concrete (not generic) — place it directly in a flow graph or invoke it standalone, no Instance required. Same request/response contract and same handler as the generic Request node behind connector Instances (zero behavior divergence); egress is SSRF-hardened (loopback/private/link-local/cloud-metadata addresses refused, every redirect hop re-validated)."
+      input: HttpRequest
+      output: HttpResponse
     - name: StreamBody
       description: "GET a URL and emit its response body as a series of raw byte chunks, read incrementally from the response as it downloads (never buffered whole in memory) — chunk size ~1 MiB by default, well under the platform's 24 MiB/frame ceiling. A non-2xx status or any transport failure ends the stream with a single structured error frame instead of a node failure (see StreamBodyChunk.error_code). Idempotent: a redelivered execution restarts the download from byte 0."
       input: StreamGetRequest
