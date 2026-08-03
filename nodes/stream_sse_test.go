@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	gen "christiangeorgelucas/http-tools/gen"
 	"christiangeorgelucas/http-tools/nodes"
@@ -126,6 +127,34 @@ func TestStreamSse_404IsErrorFrame(t *testing.T) {
 	frames := runStreamSse(t, &gen.StreamGetRequest{Url: srv.URL})
 	if len(frames) != 1 || frames[0].GetErrorCode() != "HTTP_ERROR_STATUS" || frames[0].GetStatusCode() != 404 {
 		t.Fatalf("unexpected frames: %+v", frames)
+	}
+}
+
+func TestStreamSse_CRLFSplitAcrossReadBoundary(t *testing.T) {
+	// The "\r" of a "\r\n" terminator arrives in one Read() call, its paired
+	// "\n" in the NEXT — the ambiguous case sseLineSplitter's heldCR state
+	// exists for. A flush + delay forces the server to deliver these as two
+	// distinct TCP reads rather than one coalesced read.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: first\r"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Write([]byte("\n\r\ndata: second\r\n\r\n"))
+	}))
+	defer srv.Close()
+
+	frames := runStreamSse(t, &gen.StreamGetRequest{Url: srv.URL})
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 events, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].GetData() != "first" || frames[1].GetData() != "second" {
+		t.Fatalf("expected clean split data with no stray CR, got %q and %q", frames[0].GetData(), frames[1].GetData())
+	}
+	if !frames[1].GetIsFinal() {
+		t.Fatal("expected last frame final")
 	}
 }
 

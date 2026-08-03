@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	gen "christiangeorgelucas/http-tools/gen"
 	"christiangeorgelucas/http-tools/nodes"
@@ -207,6 +208,60 @@ func TestStreamBody_MidDownloadDropIsErrorFrame(t *testing.T) {
 		if f.GetIsFinal() {
 			t.Fatalf("a pre-drop data frame was incorrectly marked final: %+v", f)
 		}
+	}
+}
+
+func TestStreamBody_MidChunkDropDoesNotLoseAlreadyReadBytes(t *testing.T) {
+	// Regression test: the drop happens NOT at a chunk-size boundary (100
+	// bytes in, well short of the 4096-byte chunk) — readChunk's manual
+	// Read loop must still surface those 100 genuinely-downloaded bytes as
+	// a data frame instead of silently discarding them.
+	restore := nodes.SetBlockIPForTest(func(net.IP) bool { return false })
+	defer restore()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000000")
+		w.WriteHeader(200)
+		w.Write(make([]byte, 100))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Force the 100 bytes to reach the client as a distinct, earlier
+		// Read() call rather than being coalesced with the connection
+		// close into one Read() that returns data+error together (which
+		// would trivially "work" regardless of whether the fix is
+		// present, defeating the point of this regression test).
+		time.Sleep(50 * time.Millisecond)
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	in := make(chan *gen.StreamGetRequest, 1)
+	in <- &gen.StreamGetRequest{Url: srv.URL, ChunkSizeBytes: 4096}
+	close(in)
+	var frames []*gen.StreamBodyChunk
+	err := nodes.StreamBody(context.Background(), newTestContext(t), in, func(f *gen.StreamBodyChunk) error {
+		frames = append(frames, f)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamBody returned error: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 frames (the 100 genuinely-read bytes, then the terminal error), got %d: %+v", len(frames), frames)
+	}
+	if len(frames[0].GetData()) != 100 || frames[0].GetIsFinal() {
+		t.Fatalf("expected the first frame to carry the 100 bytes actually read and NOT be final, got %+v", frames[0])
+	}
+	if frames[1].GetErrorCode() != "BODY_READ_FAILED" || !frames[1].GetIsFinal() || len(frames[1].GetData()) != 0 {
+		t.Fatalf("expected a terminal BODY_READ_FAILED frame, got %+v", frames[1])
 	}
 }
 

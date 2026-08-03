@@ -61,18 +61,22 @@ func streamBodyOne(ctx context.Context, ax axiom.Context, input *gen.StreamGetRe
 	// io.ReadFull cannot tell "last legitimate partial chunk" from "the
 	// connection dropped mid-chunk". Inspecting each raw Read() error
 	// preserves that distinction: only a raw io.EOF is a clean stream end.
+	// On a non-EOF error, readChunk still returns whatever bytes it
+	// genuinely read before the error (data may be non-empty) — a caller
+	// must not discard bytes that were legitimately downloaded just
+	// because the read that followed them failed.
 	readChunk := func() (data []byte, eof bool, err error) {
 		n := 0
 		for n < len(buf) {
 			rn, rerr := resp.Body.Read(buf[n:])
 			n += rn
 			if rerr != nil {
+				out := make([]byte, n)
+				copy(out, buf[:n])
 				if rerr == io.EOF {
-					out := make([]byte, n)
-					copy(out, buf[:n])
 					return out, true, nil
 				}
-				return nil, false, rerr
+				return out, false, rerr
 			}
 		}
 		out := make([]byte, n)
@@ -88,8 +92,17 @@ func streamBodyOne(ctx context.Context, ax axiom.Context, input *gen.StreamGetRe
 	for {
 		data, eof, rerr := readChunk()
 		if rerr != nil {
+			// Emit whatever was already pending, THEN whatever this failed
+			// read genuinely read before it errored (if any) — a caller
+			// must never silently lose bytes that were truly downloaded
+			// just because the read that followed them failed.
 			if pending != nil {
 				if e := emit(pending); e != nil {
+					return e
+				}
+			}
+			if len(data) > 0 {
+				if e := emit(&gen.StreamBodyChunk{Data: data, ByteOffset: offset, StatusCode: statusCode}); e != nil {
 					return e
 				}
 			}
