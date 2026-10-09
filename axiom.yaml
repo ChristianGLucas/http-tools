@@ -1,5 +1,5 @@
 name: christiangeorgelucas/http-tools
-version: 0.7.0
+version: 0.8.0
 language: go
 nodes:
     - name: Request
@@ -27,3 +27,10 @@ nodes:
       input: StreamGetRequest
       output: StreamSseEvent
       type: pipeline
+    - name: StreamRequest
+      description: "The GENERIC streaming HTTP node behind streaming connector Instances (an LLM's token stream): any method, a request body and up to two auth carriers — the same HttpRequest the Request node takes — with the text/event-stream response relayed one frame per dispatched Server-Sent Event as bytes arrive. Bind it with an Instance whose input map builds url/method/body/auth (e.g. an OpenAI-compatible POST with \"stream\": true) and whose output map reads each event's data, once per frame. Failures are in-band terminal frames (error_code, error; a non-2xx quotes up to 2 KiB of the provider's own reason); with typed_errors=true a pre-flight problem (bad url, unset secret: SECRET_NOT_SET) is one too. Runs until the server closes the stream or the 5-minute node-stream ceiling. SSRF-hardened like Request."
+      input: HttpRequest
+      output: StreamSseEvent
+      type: pipeline
+      kind: generic
+      generic_ports: [input, output]

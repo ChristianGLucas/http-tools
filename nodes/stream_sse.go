@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -134,15 +135,23 @@ func streamSseOne(ctx context.Context, ax axiom.Context, input *gen.StreamGetReq
 	}
 	defer resp.Body.Close()
 
-	statusCode := int32(resp.StatusCode)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return emit(&gen.StreamSseEvent{
-			StatusCode: statusCode,
+			StatusCode: int32(resp.StatusCode),
 			ErrorCode:  "HTTP_ERROR_STATUS",
 			Error:      httpErrorStatusMessage(resp.StatusCode),
 			IsFinal:    true,
 		})
 	}
+	return relaySse(ctx, resp, emit)
+}
+
+// relaySse parses an open 2xx text/event-stream response per the WHATWG
+// event-stream algorithm as bytes arrive and emits one frame per dispatched
+// event, the last one with is_final. Shared by StreamSse (GET) and
+// StreamRequest (any method, a body, two auth carriers).
+func relaySse(ctx context.Context, resp *http.Response, emit func(*gen.StreamSseEvent) error) error {
+	statusCode := int32(resp.StatusCode)
 
 	var (
 		splitter     sseLineSplitter
