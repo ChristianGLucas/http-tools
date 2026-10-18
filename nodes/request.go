@@ -67,19 +67,13 @@ func transportFailure(input *gen.HttpRequest, code, format string, args ...any) 
 func Request(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (*gen.HttpResponse, error) {
 	// Validate up front so malformed input fails cleanly rather than deep in the
 	// HTTP stack.
-	rawURL := strings.TrimSpace(input.GetUrl())
-	if rawURL == "" {
-		return transportFailure(input, "INVALID_URL", "url is required")
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return transportFailure(input, "INVALID_URL", "invalid url %q: %v", rawURL, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return transportFailure(input, "INVALID_URL", "unsupported url scheme %q: only http and https are allowed", u.Scheme)
-	}
-	if u.Host == "" {
-		return transportFailure(input, "INVALID_URL", "url %q has no host", rawURL)
+	// The URL: `url` itself, or the person's address (address_secret_name) + `url` as a path.
+	u, prob := resolveRequestURL(ax, input)
+	if prob != nil {
+		if prob.hard {
+			return nil, prob.err
+		}
+		return transportFailure(input, prob.code, "%v", prob.err)
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(input.GetMethod()))

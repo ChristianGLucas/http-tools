@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -93,19 +92,10 @@ func streamRequestOne(ctx context.Context, ax axiom.Context, input *gen.HttpRequ
 // Request node. The time budget covers the whole stream (default
 // streamDefaultTimeout, under the platform's 5-minute node-stream ceiling).
 func buildStreamHttpRequest(ctx context.Context, ax axiom.Context, input *gen.HttpRequest) (req *http.Request, client *http.Client, cancel context.CancelFunc, redactParams []string, err error) {
-	rawURL := strings.TrimSpace(input.GetUrl())
-	if rawURL == "" {
-		return nil, nil, nil, nil, preflight("INVALID_URL", "url is required")
-	}
-	u, perr := url.Parse(rawURL)
-	if perr != nil {
-		return nil, nil, nil, nil, preflight("INVALID_URL", "invalid url %q: %v", rawURL, perr)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, nil, nil, nil, preflight("INVALID_URL", "unsupported url scheme %q: only http and https are allowed", u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, nil, nil, nil, preflight("INVALID_URL", "url %q has no host", rawURL)
+	u, prob := resolveRequestURL(ax, input)
+	if prob != nil {
+		// An unset address secret is a pre-flight problem like an unset auth secret (SECRET_NOT_SET).
+		return nil, nil, nil, nil, &preflightError{code: prob.code, err: prob.err}
 	}
 	method := strings.ToUpper(strings.TrimSpace(input.GetMethod()))
 	if method == "" {
