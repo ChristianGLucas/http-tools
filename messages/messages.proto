@@ -114,6 +114,19 @@ message HttpRequest {
   // singular scalars have no field presence, so an optional guard can never
   // fire on them.
   bool typed_errors = 18;
+  // Optional: the tenant secret NAME that holds this account's own API address,
+  // for a provider that gives every account its own host (Infobip:
+  // https://{account}.api.infobip.com; a Shopify shop, a Zendesk subdomain).
+  // The person sets it like a key; the address itself never appears in the
+  // manifest, a config or a CEL adapter. When set, `url` is a PATH ("/sms/3/
+  // messages", empty for the address itself) and the request goes to the
+  // address + that path. Before any key is attached the node checks the
+  // address: https, a public DNS host name (no IP literal, no localhost or
+  // internal name, no user:password@, no port), no query or fragment. An
+  // address that fails is refused (error_code ADDRESS_INVALID with
+  // typed_errors). An absolute `url` with an address secret is refused too.
+  // Declare the name in the Instance's required_secrets.
+  string address_secret_name = 19;
 }
 
 // A generalized outbound HTTP response. This is the generic output port of the
@@ -135,6 +148,7 @@ message HttpResponse {
   // status — read status_code for it). Only ever set when the request carried
   // typed_errors=true. One of:
   //   INVALID_URL        the url was empty, unparseable, not http/https, or had no host
+  //   ADDRESS_INVALID    the address secret (address_secret_name) is not a public https address
   //   BLOCKED_ADDRESS    refused by the SSRF policy (private/loopback/link-local/metadata)
   //   TIMEOUT            the per-request timeout elapsed
   //   REQUEST_FAILED     DNS failure, connection refused, TLS failure, too many redirects

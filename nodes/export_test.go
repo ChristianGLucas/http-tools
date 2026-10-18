@@ -1,6 +1,11 @@
 package nodes
 
-import "net"
+import (
+	"net"
+
+	"christiangeorgelucas/http-tools/axiom"
+	gen "christiangeorgelucas/http-tools/gen"
+)
 
 // This file is compiled only under `go test`. It exposes internal seams to the
 // external nodes_test package so tests can exercise the happy path (which would
@@ -17,4 +22,16 @@ func SetBlockIPForTest(f func(net.IP) bool) (restore func()) {
 	old := blockIP
 	blockIP = f
 	return func() { blockIP = old }
+}
+
+// CheckAddress exposes the per-account address check (address_secret_name).
+func CheckAddress(raw string) (string, error) { return checkAddress(raw) }
+
+// ResolveRequestURL exposes where a request goes: the URL, or the problem's code.
+func ResolveRequestURL(ax axiom.Context, input *gen.HttpRequest) (string, string) {
+	u, prob := resolveRequestURL(ax, input)
+	if prob != nil {
+		return "", prob.code
+	}
+	return u.String(), ""
 }
